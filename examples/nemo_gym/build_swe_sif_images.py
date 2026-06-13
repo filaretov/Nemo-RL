@@ -14,11 +14,11 @@
 
 """Convert the per-instance SWE images published by the ARM build steps into the ``.sif`` layout the Nemotron-3-Ultra SWE recipe expects under ``${SIF_DIR}``.
 
-Pass ``--swe-gym-ids`` and/or ``--rebench-report``
+Pass ``--swe-gym-ids``/``--swe-gym-ids-file`` and/or ``--rebench-report``
 
 Usage:
     python build_swe_sif_images.py --registry "$REGISTRY" --sif-dir "$SIF_DIR" \
-        --swe-gym-ids swe-gym-arm-build/swe_gym_instance_ids.txt \
+        --swe-gym-ids-file swe-gym-arm-build/swe_gym_instance_ids.txt \
         --rebench-report swe-rebench-v2-arm-build/eval_report.json
 """
 
@@ -33,39 +33,60 @@ from pathlib import Path
 
 
 def _apptainer_build(
-    sif_path: Path, docker_ref: str, skip_existing: bool
+    sif_path: Path, work_path: Path, docker_ref: str, skip_existing: bool
 ) -> tuple[str, str]:
     """Build one .sif. Returns (status, instance) where status is built/skipped/failed."""
     instance = sif_path.stem
     if skip_existing and sif_path.exists() and sif_path.stat().st_size > 0:
         return ("skipped", instance)
     sif_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        ["apptainer", "build", str(sif_path), docker_ref],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
+    work_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = sif_path.with_suffix(".tmp")
+
+    def _check_error(proc) -> bool:
+        if proc.returncode == 0:
+            return False
         # Missing-in-registry (failed/unpushed instance) or a real build error.
+        err_msg = (
+            proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else "error"
+        )
         print(
-            f"  FAILED {instance}: {proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'see apptainer output'}",
+            f"  FAILED {instance}: {err_msg}",
             flush=True,
         )
-        return ("failed", instance)
+        return True
+
+    commands = [
+        [
+            "apptainer",
+            "-d",
+            "build",
+            "--disable-cache",
+            "--mksquashfs-args",
+            "-processors 2 -no-xattrs",
+            str(work_path),
+            docker_ref,
+        ],
+        ["cp", str(work_path), str(tmp_path)],
+        ["mv", str(tmp_path), str(sif_path)],
+    ]
+    for cmd in commands:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if _check_error(proc):
+            return ("failed", instance)
+    print(f"  SUCCESS {instance}")
     return ("built", instance)
 
 
 def _swe_gym_jobs(
-    registry: str, sif_dir: Path, ids_file: Path
-) -> list[tuple[Path, str]]:
+    registry: str, sif_dir: Path, work_dir: Path, instance_ids: list[str]
+) -> list[tuple[Path, Path, str]]:
     jobs = []
-    for line in ids_file.read_text().splitlines():
-        iid = line.strip()
-        if not iid or iid.startswith("#"):
-            continue
+    for iid in instance_ids:
         jobs.append(
             (
                 sif_dir / "swegym" / f"sweb.eval.arm64.{iid}.sif",
+                work_dir / "swegim" / f"sweb.eval.arm64.{iid}.sif",
                 f"docker://{registry}/swe-gym:sweb.eval.arm64.{iid}",
             )
         )
@@ -73,8 +94,8 @@ def _swe_gym_jobs(
 
 
 def _swe_rebench_jobs(
-    registry: str, sif_dir: Path, report_file: Path
-) -> list[tuple[Path, str]]:
+    registry: str, sif_dir: Path, work_dir: Path, report_file: Path
+) -> list[tuple[Path, Path, str]]:
     report = json.loads(report_file.read_text())
     # New schema: {total, completed, ok, ..., items: [...]}; old schema: a bare list.
     items = report.get("items", []) if isinstance(report, dict) else report
@@ -84,12 +105,14 @@ def _swe_rebench_jobs(
             continue
         if not r.get("passed_match"):  # respect the verify gate
             continue
-        if r.get("uploaded") is False:  # passed but the registry push failed -> not pullable
+        # passed but the registry push failed -> not pullable
+        if r.get("uploaded") is False:
             continue
         iid = r["instance_id"]
         jobs.append(
             (
                 sif_dir / "swerebench" / f"{iid}.sif",
+                work_dir / "swerebench" / f"{iid}.sif",
                 f"docker://{registry}/swerebenchv2/{iid}:latest",
             )
         )
@@ -106,6 +129,12 @@ def main() -> None:
         help="Registry endpoint (default: $REGISTRY).",
     )
     ap.add_argument(
+        "--work-dir",
+        type=Path,
+        default=os.environ.get("WORK_DIR"),
+        help="Work directory in which to initially write the SIF files, ideally local, not NFS, Lustre or the like",
+    )
+    ap.add_argument(
         "--sif-dir",
         type=Path,
         default=os.environ.get("SIF_DIR"),
@@ -113,6 +142,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--swe-gym-ids",
+        default=None,
+        help="Comma-separated SWE-Gym instance IDs; build SWE-Gym images when given.",
+    )
+    ap.add_argument(
+        "--swe-gym-ids-file",
         type=Path,
         default=None,
         help="swe_gym_instance_ids.txt; build SWE-Gym images when given.",
@@ -126,7 +160,7 @@ def main() -> None:
     ap.add_argument(
         "--max-workers",
         type=int,
-        default=1,
+        default=int(os.environ.get("MAX_WORKERS", "1")),
         help="Concurrent apptainer builds (default 1).",
     )
     ap.add_argument(
@@ -135,20 +169,43 @@ def main() -> None:
         help="Rebuild even if the .sif already exists.",
     )
     args = ap.parse_args()
+    if args.swe_gym_ids and args.swe_gym_ids_file:
+        ap.error("provide only one of --swe-gym-ids or --swe-gym-ids-file")
+
+    swe_gym_instance_ids: list[str] = []
+    if args.swe_gym_ids:
+        swe_gym_instance_ids = [
+            iid.strip() for iid in args.swe_gym_ids.split(",") if iid.strip()
+        ]
+    elif args.swe_gym_ids_file:
+        swe_gym_instance_ids = [
+            line.strip()
+            for line in args.swe_gym_ids_file.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
 
     if not args.registry:
         ap.error("--registry (or $REGISTRY) is required")
     if not args.sif_dir:
         ap.error("--sif-dir (or $SIF_DIR) is required")
+    if not args.work_dir:
+        ap.error("--work-dir (or $WORK_DIR) is required")
 
-    if not args.swe_gym_ids and not args.rebench_report:
-        ap.error("provide --swe-gym-ids and/or --rebench-report")
+    if not swe_gym_instance_ids and not args.rebench_report:
+        ap.error("provide --swe-gym-ids, --swe-gym-ids-file, and/or --rebench-report")
 
-    jobs: list[tuple[Path, str]] = []
-    if args.swe_gym_ids:
-        jobs += _swe_gym_jobs(args.registry, args.sif_dir, args.swe_gym_ids)
+    jobs: list[tuple[Path, Path, str]] = []
+    if swe_gym_instance_ids:
+        jobs += _swe_gym_jobs(
+            registry=args.registry,
+            sif_dir=args.sif_dir,
+            work_dir=args.work_dir,
+            instance_ids=swe_gym_instance_ids,
+        )
     if args.rebench_report:
-        jobs += _swe_rebench_jobs(args.registry, args.sif_dir, args.rebench_report)
+        jobs += _swe_rebench_jobs(
+            args.registry, args.sif_dir, args.work_dir, args.rebench_report
+        )
 
     print(
         f"Converting {len(jobs)} image(s) into {args.sif_dir} (workers={args.max_workers})",
@@ -158,8 +215,10 @@ def main() -> None:
     failed: list[str] = []
     with ThreadPoolExecutor(max_workers=args.max_workers) as ex:
         futs = [
-            ex.submit(_apptainer_build, sif_path, ref, not args.no_skip_existing)
-            for sif_path, ref in jobs
+            ex.submit(
+                _apptainer_build, sif_path, work_path, ref, not args.no_skip_existing
+            )
+            for sif_path, work_path, ref in jobs
         ]
         for fut in as_completed(futs):
             status, instance = fut.result()
