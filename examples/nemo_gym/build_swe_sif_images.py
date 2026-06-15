@@ -87,7 +87,7 @@ def _swe_gym_jobs(
         jobs.append(
             (
                 sif_dir / "swegym" / f"sweb.eval.arm64.{iid}.sif",
-                work_dir / "swegim" / f"sweb.eval.arm64.{iid}.sif",
+                work_dir / "swegym" / f"sweb.eval.arm64.{iid}.sif",
                 f"docker://{registry}/swe-gym:sweb.eval.arm64.{iid}",
             )
         )
