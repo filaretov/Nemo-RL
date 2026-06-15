@@ -114,7 +114,7 @@ def _swe_rebench_jobs(
             (
                 sif_dir / "swerebench" / f"{iid}.sif",
                 work_dir / "swerebench" / f"{iid}.sif",
-                f"docker://{registry}/swerebenchv2/{iid}:latest",
+                f"docker://{registry}/swerebenchv2:{iid}",
             )
         )
     return jobs
