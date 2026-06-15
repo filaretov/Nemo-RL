@@ -69,6 +69,7 @@ def _apptainer_build(
         ],
         ["cp", str(work_path), str(tmp_path)],
         ["mv", str(tmp_path), str(sif_path)],
+        ["rm", str(work_path)],
     ]
     for cmd in commands:
         proc = subprocess.run(cmd, capture_output=True, text=True)
