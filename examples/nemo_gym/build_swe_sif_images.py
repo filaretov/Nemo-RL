@@ -93,6 +93,19 @@ def _swe_gym_jobs(
         )
     return jobs
 
+def _r2e_gym_jobs(
+    registry: str, sif_dir: Path, work_dir: Path, instance_ids_file: Path
+) -> list[tuple[Path, Path, str]]:
+    jobs = []
+    for iid in instance_ids_file.read_text().splitlines():
+        jobs.append(
+            (
+                sif_dir / "r2egym" / f"{iid}.sif",
+                work_dir / "r2egym" / f"{iid}.sif",
+                f"docker://{registry}:{iid}",
+            )
+        )
+    return jobs
 
 def _swe_rebench_jobs(
     registry: str, sif_dir: Path, work_dir: Path, report_file: Path
@@ -153,6 +166,12 @@ def main() -> None:
         help="swe_gym_instance_ids.txt; build SWE-Gym images when given.",
     )
     ap.add_argument(
+        "--r2e-gym-ids-file",
+        type=Path,
+        default=None,
+        help="r2e_gym_instance_ids.txt; build R2E-Gym images when given.",
+    )
+    ap.add_argument(
         "--rebench-report",
         type=Path,
         default=None,
@@ -192,8 +211,8 @@ def main() -> None:
     if not args.work_dir:
         ap.error("--work-dir (or $WORK_DIR) is required")
 
-    if not swe_gym_instance_ids and not args.rebench_report:
-        ap.error("provide --swe-gym-ids, --swe-gym-ids-file, and/or --rebench-report")
+    if not swe_gym_instance_ids and not args.rebench_report and not args.r2e_gym_ids_file:
+        ap.error("provide --swe-gym-ids, --swe-gym-ids-file, and/or --rebench-report, or --r2e-gym-ids-file")
 
     jobs: list[tuple[Path, Path, str]] = []
     if swe_gym_instance_ids:
@@ -206,6 +225,10 @@ def main() -> None:
     if args.rebench_report:
         jobs += _swe_rebench_jobs(
             args.registry, args.sif_dir, args.work_dir, args.rebench_report
+        )
+    if args.r2e_gym_ids_file:
+        jobs += _r2e_gym_jobs(
+                args.registry, args.sif_dir, args.work_dir, args.r2e_gym_ids_file
         )
 
     print(
