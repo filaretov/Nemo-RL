@@ -151,7 +151,7 @@ the qualified `e0a5b1d` build with `a484936`.
 See `data_scripts/README.md` for the raw procedures that download the HF
 snapshot, build the mcore checkpoint cache and R2E-Gym SIF images, and produce
 the train/validation JSONL files. The committed instance lists produce 700
-training rows and 251 validation rows. Keep site paths in an external,
+training rows and 256 validation rows. Keep site paths in an external,
 untracked data config and pass it with `--data-config`. Set
 `QWEN35_CURRICULUM_DATA_PATH` to the generated
 `benchmark_r2e_gym_easy_train.jsonl` and
